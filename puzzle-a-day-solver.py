@@ -58,6 +58,31 @@ block_shapes = [
 ]
 
 
+def generate_mat2bin_lut():
+    base_bit = 1 << 63
+    lut = np.zeros((7, 7), dtype=np.uint64)
+    for y in range(7):
+        for x in range(7):
+            b = 8 * y + x
+            lut[y, x] = base_bit >> (63- 8 * y - x) 
+    return lut
+
+mat2bin_lut = generate_mat2bin_lut()
+
+def mat2bin(mat):
+    assert mat.shape[0] == 7 and mat.shape[1] == 7
+    lut = mat2bin_lut.copy()
+    lut[mat == 0] = 0
+    return np.sum(lut) # as np.unit64
+
+def bin2mat(b):
+    mat = np.zeros((7, 7), dtype=np.uint8)
+    for y in range(7):
+        for x in range(7):
+            if (b & mat2bin_lut[y, x]):
+                mat[y, x] = 1 
+    return mat
+
 def str2matrix(str_mat=None):
     """
     文字列ベースのマトリックスから ndarray を作成
@@ -75,6 +100,7 @@ def str2matrix(str_mat=None):
     def func(e): return {True: 1, False: 0}[e == ' X ']
     int_mat = list(map(func, str_mat))
     mat = np.asarray(int_mat, dtype=np.uint8).reshape(-1, 7)
+
     return mat
 
 
@@ -103,9 +129,9 @@ def new_context(month=None, day=None):
 
     # 事前に同位体を計算
     available_blocks = pack_blocks(block_shapes)
-    mat1 = str2matrix(str_matrix)
-    mat2 = str2matrix(date2strmatrix(month, day))
-    mat3 = mat1 + mat2
+    mat1 = mat2bin(str2matrix(str_matrix))
+    mat2 = mat2bin(str2matrix(date2strmatrix(month, day)))
+    mat3 = mat1 | mat2
 
     return {
         'available_blocks': available_blocks,
@@ -123,7 +149,7 @@ def next_cell(context):
     されている前提とする
     """
 
-    mat = context['mat']
+    mat = mat2bin_lut & context['mat']
     pos = np.unravel_index(np.argmin(mat), mat.shape)
     minval = mat[pos[0], pos[1]]
 
@@ -160,8 +186,46 @@ def project_block_prepare(block):
         blocks2 = np.unique(blocks2, axis=0)
         return blocks1, blocks2
 
+def pack_block_binaries(block_shapes):
+    """
+    ブロック形状定義リストから、同位体を予め計算したリストを生成する。
+    ・np.rot90() などがかなり重いので事前計算しておく
+    ・バイナリ化のついでに、想定される回転・反転・位置を予め計算しておく
+    """
+
+    def slide(blocks):
+        mat = np.zeros((7,7))
+        num = blocks.shape[0] * (mat.shape[0] - blocks[0].shape[0] +
+                             1) * (mat.shape[1] - blocks[0].shape[1] + 1)
+        mat_candidates = np.zeros(
+            (num, mat.shape[0], mat.shape[1]), dtype=np.uint8)
+        i = 0
+        for b in blocks:
+            for y in range(mat.shape[0] - b.shape[0] + 1):
+                for x in range(mat.shape[1] - b.shape[1] + 1):
+                    mat_candidates[i, y: y + b.shape[0], x: x + b.shape[1]] = b
+                    i += 1
+
+        return list(map(lambda c: mat2bin(c), mat_candidates[0: i])) # shape=(7, 7) でスライドされたパターンのリスト
+
+    def expand_block(block_shape):
+        blocks1, blocks2 = project_block_prepare(block_shape)
+        candidates = []
+        candidates.extend(slide(blocks1))
+        candidates.extend(slide(blocks2))
+        mat_candidates = np.asarray(candidates, dtype=np.uint64)
+        mat_candidates_uniq = np.unique(mat_candidates, axis=0)
+
+        return mat_candidates_uniq
+
+    packed_blocks = []
+    for block_shape in block_shapes:
+        packed_blocks.extend([expand_block(block_shape)])
+    return packed_blocks
+
 
 def pack_blocks(block_shapes):
+    return pack_block_binaries(block_shapes)
     """
     ブロック形状定義リストから、同位体を予め計算したリストを生成する。
     np.rot90() などがかなり重いので事前計算しておく
@@ -180,7 +244,7 @@ def pack_blocks(block_shapes):
     return packed_blocks
 
 
-def project_block_internal(context, pos, blocks):
+def project_block(context, pos, blocks_uint64):
     """
     blocks に割り当てされたブロックを回転・移動させ、配置できる
     パターン(7, 7)を生成する
@@ -189,58 +253,20 @@ def project_block_internal(context, pos, blocks):
     context['mat'] に対する既存ブロックとの衝突をフィルタする
     """
 
-    mat = context['mat']
-
-    # のちのフィルタ処理をvectorize したいので
-    # ひとつの numpy array に渡された候補を全て渡す
-    num = len(blocks) * (mat.shape[0] - blocks[0].shape[0] +
-                         1) * (mat.shape[1] - blocks[0].shape[1] + 1)
-    mat_candidates = np.zeros(
-        (num, mat.shape[0], mat.shape[1]), dtype=np.uint8)
-    i = 0
-    for b in blocks:
-        for y in range(mat.shape[0] - b.shape[0] + 1):
-            for x in range(mat.shape[1] - b.shape[1] + 1):
-                mat_candidates[i, y: y + b.shape[0], x: x + b.shape[1]] = b
-                i += 1
+    mat_uint64 = context['mat']
 
     # pos で指定された座標が埋まっているパターンのみを抽出する。
-    mat_pos_flag = mat_candidates[0: i, pos[0], pos[1]] == 1
-    mat_candidates_filtered = mat_candidates[mat_pos_flag]
+    bit_pos = mat2bin_lut[pos[0], pos[1]]
+    blocks_uint64_masked = blocks_uint64 & bit_pos
+    blocks_f1_bool =blocks_uint64_masked != 0
+    blocks_f1_uint64 = blocks_uint64[blocks_f1_bool]
 
-    n = mat_candidates_filtered.shape[0]
-    mat_current = np.zeros((n, 7, 7), dtype=np.uint8)
-    for i in range(n):
-        mat_current[i - 1, :, :] = context['mat']
+    # ブロックが重なりわない ( mat & blocks == 0) 候補のみを抽出する
+    blocks_f2_masked = blocks_f1_uint64 & mat_uint64
+    blocks_f2_bool =blocks_f2_masked == 0
+    blocks_f2_uint64 = blocks_f1_uint64[blocks_f2_bool]
 
-    # ブロックが重なりあう候補の削除
-    mat_candidates_sum = mat_candidates_filtered + mat_current
-    mat_candidates_sum = mat_candidates_sum.reshape(
-        mat_candidates_sum.shape[0], -1)
-    mat_candidates_sum_amax = np.amax(mat_candidates_sum, axis=1)
-
-    # 上記フィルタを通ったものだけ返却
-    return mat_candidates_filtered[mat_candidates_sum_amax == 1]
-
-
-def project_block(context, pos, block):
-    """
-    block に割り当てされたブロックを回転・移動させ、配置できるパターン(7x7)
-    を生成する。
-    """
-    return project_block_internal(context, pos, block)
-
-
-def is_done(context):
-    """
-    全ての枠が埋まっているか評価する
-    ・値が絶対に入らないところは str_matrix にて " X " -> 1
-    ・日付部分については " X " -> 1
-    ・ブロックを配置した部分については 0 -> 1
-    このため全ての値が 1 になれば完了
-    """
-    mat = context['mat']
-    return np.min(mat) == 1 and np.max(mat) == 1
+    return blocks_f2_uint64
 
 
 def step(context):
@@ -252,12 +278,10 @@ def step(context):
     orig_available_blocks = context['available_blocks'].copy()
 
     # すでに完了しているか?
-    if is_done(context):
-        solutions.append(context['blocks'].copy())
-        # display(context['blocks'])
+    if len(context['available_blocks']) == 0:
+        #solutions.append(np.sort(context['blocks']))
+        solutions.append(context['blocks'])
         return
-
-    assert len(orig_available_blocks) > 0
 
     # 次に埋めるべき場所を決める
     pos = next_cell(context)
@@ -271,23 +295,18 @@ def step(context):
         block = available_blocks.pop(block_index)
 
         projected_blocks_mat = project_block(context, pos, block)
-        available_blocks_list = [available_blocks] * \
-            int(projected_blocks_mat.shape[0])
 
         z += projected_blocks_mat.shape[0]
 
-        # note: fit_func() 相当の処理は project 時に行われるようになったので不要
-
         # 各パターンを適用したした状態で step() を再帰実行する
-        for candidate, available_blocks_c in zip(projected_blocks_mat, available_blocks_list):
-            # print("available_blocks_c")
-            # pprint.pprint(available_blocks_c)
-            new_context = context.copy()
-            new_context['available_blocks'] = list(available_blocks_c)
-            new_context['blocks'] = context['blocks'].copy()
-            new_context['blocks'].extend([candidate])
-            new_context['mat'] = np.copy(context['mat']) + candidate
-            step(new_context)
+        for candidate in projected_blocks_mat:
+            new_ctx = {
+                'available_blocks': available_blocks,
+                'mat': context['mat'] + candidate,
+                'blocks': context['blocks'].copy()
+            }
+            new_ctx['blocks'].extend([candidate])
+            step(new_ctx)
 
     if (z == 0) and False:
         print("手詰まり depth %d" % len(context['blocks']))
@@ -302,7 +321,7 @@ def display(blocks):
         print(s)
 
 
-def render(blocks):
+def render(blocks_bin):
     """
     blocks に渡されたパターンのリストからエスケープし〇−件素で結果を
     レンダリングする。
@@ -325,6 +344,10 @@ def render(blocks):
         '\u001b[97;47m',
         '\u001b[97;100m',
     ]
+
+    blocks_mat = np.asarray(list(map(lambda b: bin2mat(b), list(blocks_bin))))
+    blocks = blocks_mat
+
 
     blocks_flatten = np.zeros(
         (len(blocks), blocks[0].reshape(-1).shape[0]), dtype=np.uint8)
@@ -398,7 +421,7 @@ if __name__ == '__main__':
     if day is None:
         day = today.day
 
-    print("Seeking the solutions for date %d/%d\n" % (month, day))
+    print("Seeking for the solutions for date %d/%d\n" % (month, day))
 
     # solution を探す
     solutions = []
@@ -410,7 +433,7 @@ if __name__ == '__main__':
     # FIXME: 重複排除は必要か？重複排除前のソートは？
     # FIXME: solutions がグローバル変数渡しになってる
 
-    solutions = np.asarray(solutions, dtype=np.uint8)  # np.unique したいので
+    solutions = np.asarray(solutions, dtype=np.uint64)  # np.unique したいので
     solutions = np.unique(solutions, axis=0)
     solutions = list(solutions)  # pop() したいので
 
