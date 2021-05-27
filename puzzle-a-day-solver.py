@@ -78,9 +78,9 @@ def str2matrix(str_mat=None):
     return mat
 
 
-def masked_matrix(month, day):
+def date2strmatrix(month, day):
     """
-    文字列ベースのマトリックスから ndarray を作成
+    日付だけマスクされた ndarray を作成
     このとき指定された月・日も 1 に初期化する
     """
 
@@ -89,11 +89,11 @@ def masked_matrix(month, day):
 
     md = 0 if month >= 7 else -1
 
-    str_mat = np.copy(str_matrix)
+    str_mat = [''] * len(str_matrix)
     str_mat[month + md] = ' X '
-    str_mat[list(str_mat).index('  1') + day - 1] = ' X '
+    str_mat[str_matrix.index('  1') + day - 1] = ' X '
 
-    return str2matrix(str_mat)
+    return str_mat
 
 
 def new_context(month=None, day=None):
@@ -103,12 +103,14 @@ def new_context(month=None, day=None):
 
     # 事前に同位体を計算
     available_blocks = pack_blocks(block_shapes)
-    mat = masked_matrix(month, day)
+    mat1 = str2matrix(str_matrix)
+    mat2 = str2matrix(date2strmatrix(month, day))
+    mat3 = mat1 + mat2
 
     return {
         'available_blocks': available_blocks,
-        'blocks': [mat],
-        'mat': mat,
+        'blocks': [mat1, mat2, ],
+        'mat': mat3,
     }
 
 
@@ -311,8 +313,9 @@ def render(blocks):
     escame_sequence_list[2~] ... ブロックへの着色のエスケープシーケンス
     """
     escape_sequence_list = [
-        '\u001b[97;31m',
-        '\u001b[97;31m',
+        '\u001b[97;37m',  # 未割り当て
+        '\u001b[97;90m',  # " X "
+        '\u001b[97;1m',  # date
         '\u001b[97;41m',
         '\u001b[97;42m',
         '\u001b[97;43m',
@@ -320,11 +323,7 @@ def render(blocks):
         '\u001b[97;45m',
         '\u001b[97;46m',
         '\u001b[97;47m',
-        '\u001b[97;41m',  # 使われるのはここまで
-        '\u001b[97;42m',
-        '\u001b[97;43m',
-        '\u001b[97;44m',
-        '\u001b[97;45m',
+        '\u001b[97;100m',
     ]
 
     blocks_flatten = np.zeros(
