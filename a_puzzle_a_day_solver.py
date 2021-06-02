@@ -64,24 +64,28 @@ def generate_mat2bin_lut():
     for y in range(7):
         for x in range(7):
             b = 8 * y + x
-            lut[y, x] = base_bit >> (63- 8 * y - x) 
+            lut[y, x] = base_bit >> (63 - 8 * y - x)
     return lut
 
+
 mat2bin_lut = generate_mat2bin_lut()
+
 
 def mat2bin(mat):
     assert mat.shape[0] == 7 and mat.shape[1] == 7
     lut = mat2bin_lut.copy()
     lut[mat == 0] = 0
-    return np.sum(lut) # as np.unit64
+    return np.sum(lut)  # as np.unit64
+
 
 def bin2mat(b):
     mat = np.zeros((7, 7), dtype=np.uint8)
     for y in range(7):
         for x in range(7):
             if (b & mat2bin_lut[y, x]):
-                mat[y, x] = 1 
+                mat[y, x] = 1
     return mat
+
 
 def str2matrix(str_mat=None):
     """
@@ -122,24 +126,7 @@ def date2strmatrix(month, day):
     return str_mat
 
 
-def new_context(month=None, day=None):
-    """
-    状態を保存するコンテキスト (dict) を初期化する
-    """
-
-    # 事前に同位体を計算
-    mat1 = mat2bin(str2matrix(str_matrix))
-    mat2 = mat2bin(str2matrix(date2strmatrix(month, day)))
-    mat3 = mat1 | mat2
-
-    return {
-        'block_bitmap': 0xFF,
-        'blocks': [mat1, mat2, ],
-        'mat': mat3,
-    }
-
-
-def next_cell(context):
+def next_cell(mat):
     """
     次に埋めるべき座標を求めます。
 
@@ -148,7 +135,7 @@ def next_cell(context):
     されている前提とする
     """
 
-    mat = mat2bin_lut & context['mat']
+    mat = mat2bin_lut & mat
     pos = np.unravel_index(np.argmin(mat), mat.shape)
     minval = mat[pos[0], pos[1]]
 
@@ -185,6 +172,7 @@ def project_block_prepare(block):
         blocks2 = np.unique(blocks2, axis=0)
         return blocks1, blocks2
 
+
 def generate_blocks_lut(block_shapes):
     """
     ブロック形状定義リストから、同位体を予め計算したリストを生成する。
@@ -193,9 +181,9 @@ def generate_blocks_lut(block_shapes):
     """
 
     def slide(blocks):
-        mat = np.zeros((7,7))
+        mat = np.zeros((7, 7))
         num = blocks.shape[0] * (mat.shape[0] - blocks[0].shape[0] +
-                             1) * (mat.shape[1] - blocks[0].shape[1] + 1)
+                                 1) * (mat.shape[1] - blocks[0].shape[1] + 1)
         mat_candidates = np.zeros(
             (num, mat.shape[0], mat.shape[1]), dtype=np.uint8)
         i = 0
@@ -205,7 +193,8 @@ def generate_blocks_lut(block_shapes):
                     mat_candidates[i, y: y + b.shape[0], x: x + b.shape[1]] = b
                     i += 1
 
-        return list(map(lambda c: mat2bin(c), mat_candidates[0: i])) # shape=(7, 7) でスライドされたパターンのリスト
+        # shape=(7, 7) でスライドされたパターンのリスト
+        return list(map(lambda c: mat2bin(c), mat_candidates[0: i]))
 
     def expand_block(block_shape):
         blocks1, blocks2 = project_block_prepare(block_shape)
@@ -225,7 +214,8 @@ def generate_blocks_lut(block_shapes):
 
 blocks_lut = generate_blocks_lut(block_shapes)
 
-def project_block(context, pos, blocks_uint64):
+
+def project_block(mat, pos, blocks_uint64):
     """
     blocks に割り当てされたブロックを回転・移動させ、配置できる
     パターン(7, 7)を生成する
@@ -234,60 +224,56 @@ def project_block(context, pos, blocks_uint64):
     context['mat'] に対する既存ブロックとの衝突をフィルタする
     """
 
-    mat_uint64 = context['mat']
+    mat_uint64 = mat
 
     # pos で指定された座標が埋まっているパターンのみを抽出する。
     bit_pos = mat2bin_lut[pos[0], pos[1]]
     blocks_uint64_masked = blocks_uint64 & bit_pos
-    blocks_f1_bool =blocks_uint64_masked != 0
+    blocks_f1_bool = blocks_uint64_masked != 0
     blocks_f1_uint64 = blocks_uint64[blocks_f1_bool]
 
     # ブロックが重なりわない ( mat & blocks == 0) 候補のみを抽出する
     blocks_f2_masked = blocks_f1_uint64 & mat_uint64
-    blocks_f2_bool =blocks_f2_masked == 0
+    blocks_f2_bool = blocks_f2_masked == 0
     blocks_f2_uint64 = blocks_f1_uint64[blocks_f2_bool]
 
     return blocks_f2_uint64
 
 
-def step(context):
+def step(solutions, block_bitmap, blocks, mat):
     """
     コンテキストに対して 1 ステップを実行、するけども再帰で実行するので
     一気に処理される
     """
     # すでに完了しているか?
-    if context['block_bitmap'] == 0:
-        solutions.append(context['blocks'])
+    if block_bitmap == 0:
+        solutions.append(blocks)
         return
 
     # 次に埋めるべき場所を決める
-    pos = next_cell(context)
+    pos = next_cell(mat)
     assert (pos is not None), "next_call returned no position"
-
-    mat = context['mat']
     z = 0
 
     for block_index in range(len(block_shapes)):
         block_bit = (1 << block_index)
-        if not (context['block_bitmap'] & block_bit):
+        if not (block_bitmap & block_bit):
             continue
 
-        child_block_bitmap = context['block_bitmap'] ^ block_bit
+        child_block_bitmap = block_bitmap ^ block_bit
 
         block = blocks_lut[block_index]
-        projected_blocks_mat = project_block(context, pos, block)
+        projected_blocks_mat = project_block(mat, pos, block)
 
         z += projected_blocks_mat.shape[0]
 
         # 各パターンを適用したした状態で step() を再帰実行する
         for candidate in projected_blocks_mat:
-            new_ctx = {
-                'block_bitmap': child_block_bitmap,
-                'mat': context['mat'] + candidate,
-                'blocks': context['blocks'].copy()
-            }
-            new_ctx['blocks'].extend([candidate])
-            step(new_ctx)
+            child_blocks = blocks.copy()
+            child_blocks.extend([candidate])
+            child_mat = mat + candidate
+            step(solutions=solutions, block_bitmap=child_block_bitmap,
+                 blocks=child_blocks, mat=child_mat)
 
     if (z == 0) and False:
         print("手詰まり depth %d" % len(context['blocks']))
@@ -328,7 +314,6 @@ def render(blocks_bin):
 
     blocks_mat = np.asarray(list(map(lambda b: bin2mat(b), list(blocks_bin))))
     blocks = blocks_mat
-
 
     blocks_flatten = np.zeros(
         (len(blocks), blocks[0].reshape(-1).shape[0]), dtype=np.uint8)
@@ -405,10 +390,17 @@ if __name__ == '__main__':
     print("Seeking for the solutions for date %d/%d\n" % (month, day))
 
     # solution を探す
-    solutions = []
-    ctx = new_context(month, day)
 
-    cProfile.run('step(ctx)')
+    # 事前に同位体を計算
+    mat1 = mat2bin(str2matrix(str_matrix))
+    mat2 = mat2bin(str2matrix(date2strmatrix(month, day)))
+    mat3 = mat1 | mat2
+
+    solutions = []
+    blocks = [mat1, mat2]
+
+    cProfile.run(
+        'step(solutions=solutions, block_bitmap=0xFF, blocks=blocks, mat=mat3)')
 
     # solution の整理
     # FIXME: 重複排除は必要か？重複排除前のソートは？
