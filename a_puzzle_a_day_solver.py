@@ -128,13 +128,12 @@ def new_context(month=None, day=None):
     """
 
     # 事前に同位体を計算
-    available_blocks = pack_blocks(block_shapes)
     mat1 = mat2bin(str2matrix(str_matrix))
     mat2 = mat2bin(str2matrix(date2strmatrix(month, day)))
     mat3 = mat1 | mat2
 
     return {
-        'available_blocks': available_blocks,
+        'block_bitmap': 0xFF,
         'blocks': [mat1, mat2, ],
         'mat': mat3,
     }
@@ -186,7 +185,7 @@ def project_block_prepare(block):
         blocks2 = np.unique(blocks2, axis=0)
         return blocks1, blocks2
 
-def pack_block_binaries(block_shapes):
+def generate_blocks_lut(block_shapes):
     """
     ブロック形状定義リストから、同位体を予め計算したリストを生成する。
     ・np.rot90() などがかなり重いので事前計算しておく
@@ -224,25 +223,7 @@ def pack_block_binaries(block_shapes):
     return packed_blocks
 
 
-def pack_blocks(block_shapes):
-    return pack_block_binaries(block_shapes)
-    """
-    ブロック形状定義リストから、同位体を予め計算したリストを生成する。
-    np.rot90() などがかなり重いので事前計算しておく
-
-    回転した場合 matrix の shape が2種類発生するので、結果は list にする
-    """
-    packed_blocks = []
-    for block_shape in block_shapes:
-        blocks1, blocks2 = project_block_prepare(block_shape)
-        packed_block = []
-        for n in range(blocks1.shape[0]):
-            packed_block.append(blocks1[n])
-        for n in range(blocks2.shape[0]):
-            packed_block.append(blocks2[n])
-        packed_blocks.append(packed_block)
-    return packed_blocks
-
+blocks_lut = generate_blocks_lut(block_shapes)
 
 def project_block(context, pos, blocks_uint64):
     """
@@ -274,12 +255,8 @@ def step(context):
     コンテキストに対して 1 ステップを実行、するけども再帰で実行するので
     一気に処理される
     """
-
-    orig_available_blocks = context['available_blocks'].copy()
-
     # すでに完了しているか?
-    if len(context['available_blocks']) == 0:
-        #solutions.append(np.sort(context['blocks']))
+    if context['block_bitmap'] == 0:
         solutions.append(context['blocks'])
         return
 
@@ -288,12 +265,16 @@ def step(context):
     assert (pos is not None), "next_call returned no position"
 
     mat = context['mat']
-
     z = 0
-    for block_index in range(len(orig_available_blocks)):
-        available_blocks = orig_available_blocks.copy()
-        block = available_blocks.pop(block_index)
 
+    for block_index in range(len(block_shapes)):
+        block_bit = (1 << block_index)
+        if not (context['block_bitmap'] & block_bit):
+            continue
+
+        child_block_bitmap = context['block_bitmap'] ^ block_bit
+
+        block = blocks_lut[block_index]
         projected_blocks_mat = project_block(context, pos, block)
 
         z += projected_blocks_mat.shape[0]
@@ -301,7 +282,7 @@ def step(context):
         # 各パターンを適用したした状態で step() を再帰実行する
         for candidate in projected_blocks_mat:
             new_ctx = {
-                'available_blocks': available_blocks,
+                'block_bitmap': child_block_bitmap,
                 'mat': context['mat'] + candidate,
                 'blocks': context['blocks'].copy()
             }
