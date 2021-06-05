@@ -59,12 +59,11 @@ block_shapes = [
 
 
 def generate_mat2bin_lut():
-    base_bit = 1 << 63
     lut = np.zeros((7, 7), dtype=np.uint64)
     for y in range(7):
         for x in range(7):
-            b = 8 * y + x
-            lut[y, x] = base_bit >> (63 - 8 * y - x)
+            b = 63 - 8 * y - x
+            lut[y, x] = 1 << b
     return lut
 
 
